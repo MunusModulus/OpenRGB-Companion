@@ -1,0 +1,20 @@
+[package]
+name = "openrgb-companion"
+version = "0.11.12"
+description = "A profile and usability companion for OpenRGB"
+authors = ["OpenRGB Companion contributors"]
+edition = "2021"
+license = "GPL-2.0-only"
+
+[lib]
+name = "openrgb_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+openrgb2 = "0.3.0"

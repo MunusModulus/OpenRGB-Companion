@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.vite/
+src-tauri/target/
+*.log
+.DS_Store
+
+# Local development / publish notes
+OpenRGB-COMPÉÅÉÇ.txt
+GITHUB_PUBLISH_CHECKLIST.md
+OpnRGB-COMPÉÅÉÇ.txt
