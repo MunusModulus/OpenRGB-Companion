@@ -44,4 +44,5 @@ export type SavedProfile = {
 export type CaptureProfileResult = {
   profile: SavedProfile;
   snapshot: OpenRgbSnapshot;
+  backup_path: string | null;
 };

@@ -753,21 +753,35 @@ export default function App() {
     }
   }
 
-  function openNewEditor() {
-    if (!snapshot) return;
-    beginEditorSession();
-    const zones = editorZonesFromControllers(snapshot.controllers);
-    setEditor({
-      mode: "new",
-      name: "",
-      original_name: null,
-      base_profile_name: null,
-      zones,
-      initial_zones: cloneEditorZones(zones),
-    });
-    setEditorDrafts(makeEditorDrafts(zones));
-    setEditorError(null);
-    setEditorStatus(null);
+  async function openNewEditor() {
+    if (!snapshot || loading) return;
+
+    setLoading(true);
+    setOpenRgbError(null);
+    try {
+      // A new Profile must start from a fresh read-back of the hardware, not
+      // from whatever snapshot happened to be left by an earlier Profile load.
+      const freshSnapshot = await invoke<OpenRgbSnapshot>("scan_openrgb");
+      setSnapshot(freshSnapshot);
+
+      beginEditorSession();
+      const zones = editorZonesFromControllers(freshSnapshot.controllers);
+      setEditor({
+        mode: "new",
+        name: "",
+        original_name: null,
+        base_profile_name: null,
+        zones,
+        initial_zones: cloneEditorZones(zones),
+      });
+      setEditorDrafts(makeEditorDrafts(zones));
+      setEditorError(null);
+      setEditorStatus("現在の実機RGBを読み直し、この値を新規Profileの初期値にしました。");
+    } catch (e) {
+      setOpenRgbError(`新規Profile用の現在RGBを取得できませんでした: ${String(e)}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   function openEditEditor(profile: SavedProfile) {
@@ -1104,6 +1118,10 @@ export default function App() {
     setPendingEditSave(false);
     try {
       await waitForLiveApplyIdle();
+      // The backend applies the requested RGB values before SAVE_PROFILE.
+      // Mark hardware as touched before invoking it so a failed save can still
+      // be safely discarded/restored by the editor.
+      editorTouchedHardwareRef.current = true;
       const result = await invoke<CaptureProfileResult>("save_profile_from_colors", {
         profileName,
         zoneColors: editorZonePayload(),
@@ -1115,7 +1133,9 @@ export default function App() {
       closeEditorNow();
       setMessage(
         allowOverwrite
-          ? `「${result.profile.name}」を上書き保存しました。`
+          ? result.backup_path
+            ? `「${result.profile.name}」を上書き保存しました。変更前のOpenRGB Profileは自動バックアップ済みです。`
+            : `「${result.profile.name}」を保存しました。`
           : `「${result.profile.name}」をOpenRGBとCompanionへ保存しました。`,
       );
     } catch (e) {
@@ -1262,7 +1282,7 @@ export default function App() {
           <span className="count-badge">{unifiedProfiles.length} Profiles</span>
           <button
             className="new-profile-button"
-            onClick={openNewEditor}
+            onClick={() => void openNewEditor()}
             disabled={!snapshot || loading || capturingProfile !== null || savingSavedProfile !== null}
             title={!snapshot ? "新規Profile作成にはOpenRGB Serverへの接続が必要です" : undefined}
           >
@@ -1752,6 +1772,7 @@ export default function App() {
               <span>{editor.zones.length} zones</span>
               <span>RGB 0–255</span>
               <span>保存時にOpenRGB ProfileとCompanion台帳の両方へ反映</span>
+              {editor.mode === "new" && <span>初期値: 新規作成時に読み直した実機RGB</span>}
               {editor.mode === "edit" && (
                 <span className={editorHasColorChanges ? "editor-dirty-badge dirty" : "editor-dirty-badge"}>
                   {editorHasColorChanges ? "未保存の変更" : "変更なし"}
@@ -1864,7 +1885,7 @@ export default function App() {
             <p><>
                   変更前のRGB値を残す場合は［名前を付けて保存］でこのProfileを別名保存してください。
                   <br />
-                  ［上書き保存］すると、現在のRGB値で既存Profileを更新します。
+                  ［上書き保存］すると、変更前のOpenRGB Profileを自動バックアップしてから現在のRGB値で更新します。
                 </></p>
             <div className="dialog-actions save-choice-actions">
               <button className="dialog-cancel" onClick={() => setPendingEditSave(false)}>キャンセル</button>

@@ -1,10 +1,9 @@
-node_modules/
+﻿node_modules/
 dist/
 .vite/
 src-tauri/target/
 *.log
 .DS_Store
-
-# Local development / publish notes
+release-out/
 GITHUB_PUBLISH_CHECKLIST.md
-OpnRGB-COMPメモ.txt
+OpnRGB-COMP*.txt

@@ -12,6 +12,7 @@ use tauri::AppHandle;
 struct CaptureProfileResult {
     profile: SavedProfile,
     snapshot: OpenRgbSnapshot,
+    backup_path: Option<String>,
 }
 
 #[tauri::command]
@@ -48,7 +49,11 @@ async fn capture_openrgb_profile(
     let _ = openrgb::ensure_openrgb_ready()?;
     let snapshot = openrgb::load_profile_and_scan(&profile_name).await?;
     let profile = storage::upsert(&app, profile_name, snapshot.controllers.clone())?;
-    Ok(CaptureProfileResult { profile, snapshot })
+    Ok(CaptureProfileResult {
+        profile,
+        snapshot,
+        backup_path: None,
+    })
 }
 
 #[tauri::command]
@@ -75,15 +80,25 @@ async fn save_profile_from_colors(
     base_profile_name: Option<String>,
 ) -> Result<CaptureProfileResult, String> {
     let _ = openrgb::ensure_openrgb_ready()?;
-    let snapshot = openrgb::save_profile_from_zone_colors(
+    let outcome = openrgb::save_profile_from_zone_colors(
         &profile_name,
         &zone_colors,
         allow_overwrite,
         base_profile_name.as_deref(),
     )
     .await?;
-    let profile = storage::upsert(&app, profile_name, snapshot.controllers.clone())?;
-    Ok(CaptureProfileResult { profile, snapshot })
+    let profile = storage::upsert(
+        &app,
+        profile_name,
+        outcome.snapshot.controllers.clone(),
+    )?;
+    Ok(CaptureProfileResult {
+        profile,
+        snapshot: outcome.snapshot,
+        backup_path: outcome
+            .backup_path
+            .map(|path| path.to_string_lossy().into_owned()),
+    })
 }
 
 #[tauri::command]

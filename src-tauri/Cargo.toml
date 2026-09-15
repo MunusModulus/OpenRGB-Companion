@@ -1,6 +1,6 @@
 [package]
 name = "openrgb-companion"
-version = "0.11.12"
+version = "0.11.15"
 description = "A profile and usability companion for OpenRGB"
 authors = ["OpenRGB Companion contributors"]
 edition = "2021"

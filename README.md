@@ -49,6 +49,15 @@ OpenRGB Profile と Companion の記録は別々に保持されます。
 Companion に記録した Profile では RGB 値を確認・編集できます。
 編集結果は実機へプレビューした後、OpenRGB Profile として保存できます。
 
+### 保存時の安全策
+
+- 新規 Profile は作成開始時に現在の実機 RGB を読み直し、その値を初期値にします。
+- Profile 保存前に、OpenRGB から RGB を再読込して保存予定値と一致することを確認します。一致しない場合は `SAVE_PROFILE` を送信せず中止します。
+- 既存 OpenRGB Profile を上書きする場合は、変更前の `.orp` を自動バックアップしてから保存します。
+- 保存後にも Profile を再ロードし、RGB が保存予定値と一致することを確認します。
+
+上書き前のバックアップは通常 `%LOCALAPPDATA%\OpenRGB Companion\profile-backups` に保存されます。
+
 ### Profile 名の制限
 
 OpenRGB 側でのファイル名互換性と安定性を優先するため、

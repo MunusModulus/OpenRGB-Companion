@@ -1,7 +1,7 @@
 {
   "name": "openrgb-companion",
   "private": true,
-  "version": "0.11.12",
+  "version": "0.11.15",
   "type": "module",
   "scripts": {
     "dev": "vite",

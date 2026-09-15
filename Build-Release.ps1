@@ -5,7 +5,7 @@
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
-$Version = "0.11.12"
+$Version = "0.11.15"
 $ExeName = "openrgb-companion.exe"
 
 function Require-Command([string]$Name, [string]$Hint) {

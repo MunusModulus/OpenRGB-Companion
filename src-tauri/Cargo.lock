@@ -2137,7 +2137,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openrgb-companion"
-version = "0.11.12"
+version = "0.11.15"
 dependencies = [
  "openrgb2",
  "serde",

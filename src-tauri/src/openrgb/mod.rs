@@ -1,11 +1,12 @@
 use std::env;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
@@ -546,6 +547,91 @@ fn save_profile_raw_v5(profile_name: &str) -> Result<(), String> {
     Ok(())
 }
 
+
+fn existing_profile_file_path(profile_name: &str) -> Result<PathBuf, String> {
+    let appdata = env::var_os("APPDATA")
+        .ok_or_else(|| "APPDATAを取得できないため、OpenRGB Profileの場所を確認できませんでした。".to_owned())?;
+    Ok(PathBuf::from(appdata)
+        .join("OpenRGB")
+        .join(format!("{profile_name}.orp")))
+}
+
+fn backup_existing_profile_file(profile_name: &str) -> Result<PathBuf, String> {
+    let source = existing_profile_file_path(profile_name)?;
+    if !source.is_file() {
+        return Err(format!(
+            "既存Profile「{profile_name}」の .orp ファイルを見つけられないため、安全のため上書きを中止しました: {}",
+            source.display()
+        ));
+    }
+
+    let backup_root = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .ok_or_else(|| "Profileバックアップ先を決定できませんでした。".to_owned())?;
+    let backup_dir = PathBuf::from(backup_root)
+        .join("OpenRGB Companion")
+        .join("profile-backups");
+    fs::create_dir_all(&backup_dir).map_err(|error| {
+        format!(
+            "Profileバックアップ用フォルダを作成できませんでした ({}): {error}",
+            backup_dir.display()
+        )
+    })?;
+
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let destination = backup_dir.join(format!("{profile_name}_{timestamp_ms}.orp"));
+
+    fs::copy(&source, &destination).map_err(|error| {
+        format!(
+            "既存Profile「{profile_name}」のバックアップに失敗したため上書きを中止しました ({} -> {}): {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+
+    Ok(destination)
+}
+
+fn backup_hint(backup_path: Option<&Path>) -> String {
+    backup_path
+        .map(|path| format!(" 変更前のProfileは {} にバックアップ済みです。", path.display()))
+        .unwrap_or_default()
+}
+
+async fn wait_for_applied_zone_colors(
+    zone_colors: &[ZoneColorInput],
+) -> Result<OpenRgbSnapshot, String> {
+    const VERIFY_ATTEMPTS: usize = 6;
+    const VERIFY_INTERVAL: Duration = Duration::from_millis(80);
+
+    let mut last_mismatch = "RGB状態を確認できませんでした。".to_owned();
+
+    for attempt in 0..VERIFY_ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(VERIFY_INTERVAL);
+        }
+
+        let snapshot = scan().await?;
+        match snapshot_matches_zone_colors(&snapshot, zone_colors) {
+            Ok(()) => return Ok(snapshot),
+            Err(error) => last_mismatch = error,
+        }
+    }
+
+    Err(format!(
+        "OpenRGBの現在状態が保存予定のRGB値と一致しないため、Profile保存を中止しました。SAVE_PROFILEは送信していません。{last_mismatch}"
+    ))
+}
+
+#[derive(Debug)]
+pub struct SaveProfileOutcome {
+    pub snapshot: OpenRgbSnapshot,
+    pub backup_path: Option<PathBuf>,
+}
+
 fn snapshot_matches_zone_colors(
     snapshot: &OpenRgbSnapshot,
     zone_colors: &[ZoneColorInput],
@@ -557,7 +643,7 @@ fn snapshot_matches_zone_colors(
             .find(|controller| controller.id == input.controller_id)
             .ok_or_else(|| {
                 format!(
-                    "Saved Profile verification failed: controller {} was not found.",
+                    "RGB verification failed: controller {} was not found.",
                     input.controller_id
                 )
             })?;
@@ -568,14 +654,14 @@ fn snapshot_matches_zone_colors(
             .find(|zone| zone.id == input.zone_id)
             .ok_or_else(|| {
                 format!(
-                    "Saved Profile verification failed: zone {} on controller {} was not found.",
+                    "RGB verification failed: zone {} on controller {} was not found.",
                     input.zone_id, input.controller_id
                 )
             })?;
 
         if zone.uniform_color != Some(input.color) {
             return Err(format!(
-                "OpenRGB saved Profile verification failed at \"{}\": expected RGB {}, {}, {}, but read back {}.",
+                "RGB verification failed at \"{}\": expected RGB {}, {}, {}, but read back {}.",
                 zone.name,
                 input.color.r,
                 input.color.g,
@@ -729,18 +815,80 @@ async fn apply_zone_colors_with_client(
         .await
         .map_err(|error| error.to_string())?;
 
+    // Validate every requested controller/zone before touching hardware.
     for input in zone_colors {
         let controller = group
             .iter()
             .find(|controller| controller.id() == input.controller_id)
             .ok_or_else(|| format!("Controller not found: {}", input.controller_id))?;
 
-        let zone = controller
+        controller
             .get_zone(input.zone_id)
             .map_err(|error| error.to_string())?;
+    }
 
-        zone
-            .set_all_leds(Color::new(input.color.r, input.color.g, input.color.b))
+    // Apply one controller-wide LED buffer per controller.
+    //
+    // v0.11.14 tried to build that buffer through Command::set_zone_leds(), but
+    // openrgb2 0.3.0 rejects the full-zone form for this controller (including
+    // the 1-LED RGB headers).  Build the complete color vector ourselves using
+    // each zone's controller offset, then send exactly one UPDATE_LEDS request.
+    //
+    // This keeps unrelated zones separate while avoiding rapid consecutive
+    // UPDATE_ZONE_LEDS requests on motherboard controllers.
+    for controller in group.iter() {
+        let controller_inputs: Vec<&ZoneColorInput> = zone_colors
+            .iter()
+            .filter(|input| input.controller_id == controller.id())
+            .collect();
+
+        if controller_inputs.is_empty() {
+            continue;
+        }
+
+        let mut colors = controller.colors().to_vec();
+
+        if colors.len() != controller.num_leds() {
+            return Err(format!(
+                "Controller {} color buffer mismatch: {} colors for {} LEDs.",
+                controller.id(),
+                colors.len(),
+                controller.num_leds()
+            ));
+        }
+
+        for input in controller_inputs {
+            let zone = controller
+                .get_zone(input.zone_id)
+                .map_err(|error| error.to_string())?;
+
+            let start = zone.offset();
+            let end = start
+                .checked_add(zone.num_leds())
+                .ok_or_else(|| format!(
+                    "Zone {} on controller {} has an invalid LED range.",
+                    input.zone_id, input.controller_id
+                ))?;
+
+            if end > colors.len() {
+                return Err(format!(
+                    "Zone {} on controller {} exceeds the controller LED buffer ({}..{} of {}).",
+                    input.zone_id,
+                    input.controller_id,
+                    start,
+                    end,
+                    colors.len()
+                ));
+            }
+
+            let color = Color::new(input.color.r, input.color.g, input.color.b);
+            for led_color in &mut colors[start..end] {
+                *led_color = color;
+            }
+        }
+
+        controller
+            .set_leds(colors)
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -824,7 +972,7 @@ pub async fn save_profile_from_zone_colors(
     zone_colors: &[ZoneColorInput],
     allow_overwrite: bool,
     base_profile_name: Option<&str>,
-) -> Result<OpenRgbSnapshot, String> {
+) -> Result<SaveProfileOutcome, String> {
     let profile_name = profile_name.trim();
     if profile_name.is_empty() {
         return Err("Profile name is empty.".to_owned());
@@ -868,22 +1016,48 @@ pub async fn save_profile_from_zone_colors(
     apply_zone_colors_with_client(&client, zone_colors).await?;
     drop(client);
 
-    save_profile_raw_v5(profile_name)?;
+    // SAVE_PROFILE stores OpenRGB's current server-side state.  Never send it
+    // until a fresh SDK read-back confirms that every requested zone really
+    // contains the RGB values we intend to persist.
+    let _pre_save_verified = wait_for_applied_zone_colors(zone_colors).await?;
+
+    let profile_already_exists = existing_profiles.iter().any(|name| name == profile_name);
+    let backup_path = if allow_overwrite && profile_already_exists {
+        Some(backup_existing_profile_file(profile_name)?)
+    } else {
+        None
+    };
+
+    save_profile_raw_v5(profile_name)
+        .map_err(|error| format!("{error}{}", backup_hint(backup_path.as_deref())))?;
 
     // OpenRGB's SAVE_PROFILE packet has no success response, so never report
     // success merely because the packet was written.  Re-query the profile list
     // and then load/read the saved profile back to verify both existence and RGB.
     std::thread::sleep(Duration::from_millis(120));
 
-    let verified_profiles = get_profiles_raw_v5()?;
+    let verified_profiles = get_profiles_raw_v5()
+        .map_err(|error| format!("{error}{}", backup_hint(backup_path.as_deref())))?;
 
     if !verified_profiles.iter().any(|name| name == profile_name) {
         return Err(format!(
-            "OpenRGBへ保存要求を送信しましたが、Profile一覧に「{profile_name}」を確認できませんでした。OpenRGBは --gui --server で起動してください。"
+            "OpenRGBへ保存要求を送信しましたが、Profile一覧に「{profile_name}」を確認できませんでした。OpenRGBは --gui --server で起動してください。{}",
+            backup_hint(backup_path.as_deref())
         ));
     }
 
-    let verified_snapshot = load_profile_and_scan(profile_name).await?;
-    snapshot_matches_zone_colors(&verified_snapshot, zone_colors)?;
-    Ok(verified_snapshot)
+    let verified_snapshot = load_profile_and_scan(profile_name)
+        .await
+        .map_err(|error| format!("{error}{}", backup_hint(backup_path.as_deref())))?;
+    snapshot_matches_zone_colors(&verified_snapshot, zone_colors).map_err(|error| {
+        format!(
+            "OpenRGB保存後のRGB検証に失敗しました。{error}{}",
+            backup_hint(backup_path.as_deref())
+        )
+    })?;
+
+    Ok(SaveProfileOutcome {
+        snapshot: verified_snapshot,
+        backup_path,
+    })
 }
